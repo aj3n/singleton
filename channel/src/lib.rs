@@ -28,8 +28,8 @@ impl<T> Inner<T> {
 			head: 0,
 			tail: 0,
 			last_recv: true,
-			recv_ops: event_listener::Event::new(),
-			send_ops: event_listener::Event::new(),
+			recv_ops: event_listener::Event::default(),
+			send_ops: event_listener::Event::default(),
 		}
 	}
 

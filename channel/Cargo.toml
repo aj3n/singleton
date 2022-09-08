@@ -6,8 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-event-listener = "2.5.3"
+event-listener = { path = "../event_listener" }
 
 [dev-dependencies]
+#async-channel = "1.7.1"
 flume = "0.10.14"
 tokio = { version = "1", features = ["rt", "macros"], default-features = false }

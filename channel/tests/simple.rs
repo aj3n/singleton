@@ -3,40 +3,47 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 #[tokio::test]
 async fn it_works() {
-	//let now = std::time::Instant::now();
+	let len = 100;
+	test_send(len, len).await;
+	// XXX: terrible performance
+	test_send(1, len).await;
+}
+
+async fn test_send(cap: usize, len: usize) {
 	tokio::task::LocalSet::new()
 		.run_until(async {
-			let (tx, rx) = bounded(100);
+			//let now = std::time::Instant::now();
+			let (tx, rx) = bounded(cap);
 			let j = tokio::task::spawn_local(async move {
 				let mut it = 0..;
 				while let Ok(v) = rx.recv().await {
 					assert_eq!(v, it.next().unwrap());
 				}
 			});
-			for i in 0..100 {
+			for i in 0..len {
 				tx.send(i).await.unwrap();
 			}
 			drop(tx);
 			j.await.unwrap();
+			//println!("time cost: {}", now.elapsed().as_millis());
+
+			// flume
+			//let now = std::time::Instant::now();
+			let (tx, rx) = flume::bounded(cap);
+			let j = tokio::spawn(async move {
+				let mut it = 0..;
+				while let Ok(v) = rx.recv_async().await {
+					assert_eq!(v, it.next().unwrap());
+				}
+			});
+			for i in 0..len {
+				tx.send_async(i).await.unwrap();
+			}
+			drop(tx);
+			j.await.unwrap();
+			//println!("flume time cost: {}", now.elapsed().as_millis());
 		})
 		.await;
-	//println!("time cost: {}", now.elapsed().as_millis());
-
-	// flume
-	//let now = std::time::Instant::now();
-	let (tx, rx) = flume::bounded(100);
-	let j = tokio::spawn(async move {
-		let mut it = 0..;
-		while let Ok(v) = rx.recv_async().await {
-			assert_eq!(v, it.next().unwrap());
-		}
-	});
-	for i in 0..100 {
-		tx.send_async(i).await.unwrap();
-	}
-	drop(tx);
-	j.await.unwrap();
-	//println!("flume time cost: {}", now.elapsed().as_millis());
 }
 
 #[test]
