@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "channel",
+    "local_set",
     "event_listener"
 ]
