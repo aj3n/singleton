@@ -6,21 +6,24 @@ use std::{
 	task::{RawWaker, RawWakerVTable},
 };
 
+use futures::task::AtomicWaker;
+
 use crate::local_cell;
 
 pub(crate) struct Waker {
-	pub(crate) to_wake: local_cell::LocalCellRef,
-	// XXX:Some global weak reference instead maybe?
-	pub(crate) remote_waker: mpsc::Sender<usize>,
+	pub(crate) local_waker: local_cell::LocalCellRef,
+	pub(crate) foreign_waker: mpsc::Sender<usize>,
+
+	pub(crate) waker: Arc<AtomicWaker>,
 	pub(crate) id: usize,
 }
 
 impl Waker {
 	fn wake(&self) {
-		if self.to_wake.notify(self.id).is_err() {
-			// FIXME: Waker?
-			let _ = self.remote_waker.send(self.id);
+		if self.local_waker.notify(self.id).is_err() {
+			let _ = self.foreign_waker.send(self.id);
 		}
+		self.waker.wake();
 	}
 }
 

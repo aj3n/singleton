@@ -8,6 +8,7 @@ use std::{
 	task::{self, Poll},
 };
 
+use futures::task::AtomicWaker;
 use slab::Slab;
 
 mod local_cell;
@@ -18,12 +19,10 @@ struct Context {
 	tasks: RefCell<Slab<Option<TaskWrapper>>>,
 	to_wake_ref: local_cell::LocalCellRef,
 
-	// XXX:maybe some global weak reference instead?
+	// TODO
 	foreign_waker: mpsc::Sender<usize>,
 
-	//TODO: move into to LocalCell
-	waker: Option<task::Waker>,
-	waked: Cell<bool>,
+	waker: Arc<AtomicWaker>,
 }
 
 pub struct LocalSet {
@@ -116,8 +115,8 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 
 	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
 		let me = self.project();
-		me.local_set.context.waked.set(false);
-		me.local_set.context.waker = Some(cx.waker().clone());
+
+		me.local_set.context.waker.register(cx.waker());
 
 		CURRENT.set(&me.local_set.context, || {
 			if let Poll::Ready(output) = me.fut.poll(cx) {
@@ -173,8 +172,7 @@ impl Default for LocalSet {
 			context: Context {
 				tasks: RefCell::new(Slab::new()),
 				to_wake_ref: From::from(&to_wake_cell),
-				waker: None,
-				waked: Cell::new(false),
+				waker: Arc::new(AtomicWaker::new()),
 				foreign_waker: tx,
 			},
 			to_wake_cell,
@@ -195,9 +193,10 @@ where
 		let task = Box::pin(TaskImpl {
 			ctx: handle.ctx.clone(),
 			waker: Arc::new(waker::Waker {
-				to_wake: ctx.to_wake_ref.clone(),
+				local_waker: ctx.to_wake_ref.clone(),
 				id,
-				remote_waker: ctx.foreign_waker.clone(),
+				waker: ctx.waker.clone(),
+				foreign_waker: ctx.foreign_waker.clone(),
 			}),
 			fut,
 		});
