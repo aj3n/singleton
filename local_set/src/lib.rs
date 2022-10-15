@@ -8,8 +8,8 @@ use std::{
 	task::{self, Poll},
 };
 
-use futures::task::AtomicWaker;
 use slab::Slab;
+use waker::CachedWaker;
 
 mod local_cell;
 mod waker;
@@ -17,19 +17,33 @@ mod waker;
 scoped_tls::scoped_thread_local!(static CURRENT: Context);
 struct Context {
 	tasks: RefCell<Slab<Option<TaskWrapper>>>,
-	to_wake_ref: local_cell::LocalCellRef,
-
-	// TODO
-	foreign_waker: mpsc::Sender<usize>,
-
-	waker: Arc<AtomicWaker>,
+	waker: Arc<CachedWaker>,
 }
 
 pub struct LocalSet {
-	to_wake_cell: local_cell::LocalCell,
-	to_wake_foreign: mpsc::Receiver<usize>,
 	context: Context,
-	to_wake: VecDeque<usize>,
+
+	scheduler: Scheduler,
+}
+
+struct Scheduler {
+	task_queue_cell: local_cell::LocalCell,
+	task_queue_foreign: mpsc::Receiver<usize>,
+	task_queue: VecDeque<usize>,
+}
+
+impl Scheduler {
+	fn fetch(&mut self) -> Option<usize> {
+		if self.task_queue.is_empty() {
+			self.task_queue.extend(self.task_queue_cell.fetch())
+		}
+		// FIXME: foreign_waker starvation
+		self.task_queue
+			.pop_front()
+			.or_else(|| self.task_queue_foreign.try_recv().ok())
+	}
+
+	fn give_back(&mut self, id: usize) { self.task_queue.push_front(id); }
 }
 
 impl LocalSet {
@@ -116,7 +130,7 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
 		let me = self.project();
 
-		me.local_set.context.waker.register(cx.waker());
+		me.local_set.context.waker.reset(cx.waker());
 
 		CURRENT.set(&me.local_set.context, || {
 			if let Poll::Ready(output) = me.fut.poll(cx) {
@@ -125,18 +139,7 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 
 			// limit poll times to avoid some runtime's budget mechanism
 			for _ in 0..MAX_RUN_PER_POLL {
-				if me.local_set.to_wake.is_empty() {
-					me.local_set
-						.to_wake
-						.extend(me.local_set.to_wake_cell.fetch())
-				}
-
-				// FIXME: foreign_waker starvation
-				let next = me
-					.local_set
-					.to_wake
-					.pop_front()
-					.or_else(|| me.local_set.to_wake_foreign.try_recv().ok());
+				let next = me.local_set.scheduler.fetch();
 
 				if let Some(next) = next {
 					let task = me
@@ -154,8 +157,12 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 						}
 					}
 				} else {
-					break;
+					return Poll::Pending;
 				}
+			}
+			if let Some(id) = me.local_set.scheduler.fetch() {
+				me.local_set.scheduler.give_back(id);
+				cx.waker().wake_by_ref();
 			}
 			Poll::Pending
 		})
@@ -167,15 +174,15 @@ impl Default for LocalSet {
 		let to_wake_cell = local_cell::LocalCell::new();
 		let (tx, rx) = mpsc::channel();
 		Self {
-			to_wake_foreign: rx,
-			to_wake: Default::default(),
 			context: Context {
 				tasks: RefCell::new(Slab::new()),
-				to_wake_ref: From::from(&to_wake_cell),
-				waker: Arc::new(AtomicWaker::new()),
-				foreign_waker: tx,
+				waker: Arc::new(CachedWaker::new((&to_wake_cell).into(), tx)),
 			},
-			to_wake_cell,
+			scheduler: Scheduler {
+				task_queue_foreign: rx,
+				task_queue: Default::default(),
+				task_queue_cell: to_wake_cell,
+			},
 		}
 	}
 }
@@ -193,14 +200,12 @@ where
 		let task = Box::pin(TaskImpl {
 			ctx: handle.ctx.clone(),
 			waker: Arc::new(waker::Waker {
-				local_waker: ctx.to_wake_ref.clone(),
-				id,
 				waker: ctx.waker.clone(),
-				foreign_waker: ctx.foreign_waker.clone(),
+				id,
 			}),
 			fut,
 		});
-		ctx.to_wake_ref.notify(id).unwrap();
+		ctx.waker.wake_local(id).unwrap();
 		tasks[id] = Some(task);
 
 		handle
