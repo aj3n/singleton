@@ -65,7 +65,9 @@ impl LocalCellRef {
 impl Drop for LocalCell {
 	fn drop(&mut self) {
 		GLOBAL_STORE.with(|store| {
-			store.borrow_mut().remove(self.store_id);
+			let mut store = store.borrow_mut();
+			store.remove(self.store_id);
+			store.shrink_to_fit();
 		})
 	}
 }

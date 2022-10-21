@@ -34,7 +34,7 @@ fn noop_vtable() -> &'static RawWakerVTable {
 thread_local! { static C: Cell<i32> = Cell::new(0);}
 #[tokio::test]
 async fn heavy_spawn() {
-	let task_cnt = 10_000;
+	let task_cnt = 100_000;
 
 	{
 		let mut local_set = LocalSet::default();

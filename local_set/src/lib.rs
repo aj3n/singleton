@@ -20,20 +20,49 @@ struct Context {
 	waker: Arc<CachedWaker>,
 }
 
+impl Context {
+	#[inline]
+	fn spawn<F: Future + 'static>(&self, fut: F) -> JoinHandle<<F as Future>::Output> {
+		let mut tasks = self.tasks.borrow_mut();
+		let id = tasks.insert(None);
+		let handle = JoinHandle::new(id);
+		let task = Box::pin(TaskImpl {
+			ctx: handle.ctx.clone(),
+			waker: Arc::new(self.waker(id)),
+			fut,
+		});
+		self.waker.wake_local(id).unwrap();
+		tasks[id] = Some(task);
+
+		handle
+	}
+
+	#[inline]
+	fn waker(&self, id: usize) -> waker::Waker {
+		waker::Waker {
+			waker: self.waker.clone(),
+			id,
+		}
+	}
+}
+
 pub struct LocalSet {
 	context: Context,
 
 	scheduler: Scheduler,
 }
 
+// TODO: refactor this
 struct Scheduler {
 	task_queue_cell: local_cell::LocalCell,
 	task_queue_foreign: mpsc::Receiver<usize>,
 	task_queue: VecDeque<usize>,
+	tick: u8,
 }
 
 impl Scheduler {
 	fn fetch(&mut self) -> Option<usize> {
+		self.tick = self.tick.wrapping_add(1);
 		if self.task_queue.is_empty() {
 			self.task_queue.extend(self.task_queue_cell.fetch())
 		}
@@ -42,8 +71,6 @@ impl Scheduler {
 			.pop_front()
 			.or_else(|| self.task_queue_foreign.try_recv().ok())
 	}
-
-	fn give_back(&mut self, id: usize) { self.task_queue.push_front(id); }
 }
 
 impl LocalSet {
@@ -51,11 +78,20 @@ impl LocalSet {
 	where
 		F: Future,
 	{
+		// take a position without actually storing the future
+		// XXX: can't impl Drop for RunUntil, may leak if RunUntil dropped without returning Poll::Ready
+		let id = self.context.tasks.borrow_mut().insert(None);
+		self.context.waker.wake_local(id).unwrap();
 		RunUntil {
+			waker: Arc::new(self.context.waker(id)),
 			local_set: self,
 			fut,
 		}
 		.await
+	}
+
+	fn _block_on<F: Future>(&mut self, _fut: F) -> <F as Future>::Output {
+		todo!("should only be called by async executor");
 	}
 }
 
@@ -64,7 +100,7 @@ type TaskWrapper = Pin<Box<dyn Task>>;
 struct JoinHandleCtx<T> {
 	output: Cell<Option<T>>,
 	waker: Cell<Option<task::Waker>>,
-	id: Cell<usize>,
+	_id: usize,
 }
 
 pub struct JoinHandle<T> {
@@ -78,10 +114,12 @@ impl<T> JoinHandle<T> {
 			ctx: Rc::new(JoinHandleCtx {
 				output: Cell::new(None),
 				waker: Cell::new(None),
-				id: Cell::new(id),
+				_id: id,
 			}),
 		}
 	}
+
+	fn _id(&self) -> usize { self.ctx._id }
 }
 
 trait Task {
@@ -118,27 +156,26 @@ impl<F: Future> Task for TaskImpl<F> {
 #[pin_project::pin_project]
 struct RunUntil<'a, F: Future> {
 	local_set: &'a mut LocalSet,
+	waker: Arc<waker::Waker>,
 	#[pin]
 	fut: F,
 }
 
-const MAX_RUN_PER_POLL: u8 = 16;
+const MAX_RUN_PER_POLL: u8 = 32;
 
 impl<'a, F: Future> Future for RunUntil<'a, F> {
 	type Output = F::Output;
 
 	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-		let me = self.project();
+		let mut me = self.project();
 
 		me.local_set.context.waker.reset(cx.waker());
 
 		CURRENT.set(&me.local_set.context, || {
-			if let Poll::Ready(output) = me.fut.poll(cx) {
-				return Poll::Ready(output);
-			}
-
 			// limit poll times to avoid some runtime's budget mechanism
-			for _ in 0..MAX_RUN_PER_POLL {
+			let mut i = 0;
+			while i < MAX_RUN_PER_POLL {
+				i += 1;
 				let next = me.local_set.scheduler.fetch();
 
 				if let Some(next) = next {
@@ -155,13 +192,21 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 						} else {
 							me.local_set.context.tasks.borrow_mut()[next] = Some(task);
 						}
+					} else if next == me.waker.id {
+						let waker = waker::waker_ref(me.waker);
+						let mut cx = std::task::Context::from_waker(&waker);
+						if let Poll::Ready(v) = me.fut.as_mut().poll(&mut cx) {
+							me.local_set.context.tasks.borrow_mut().remove(next);
+							return Poll::Ready(v);
+						}
+					} else {
+						//XXX: task missiing or waker outliving the future, should trigger a warning
 					}
 				} else {
-					return Poll::Pending;
+					break;
 				}
 			}
-			if let Some(id) = me.local_set.scheduler.fetch() {
-				me.local_set.scheduler.give_back(id);
+			if i == MAX_RUN_PER_POLL {
 				cx.waker().wake_by_ref();
 			}
 			Poll::Pending
@@ -182,6 +227,7 @@ impl Default for LocalSet {
 				task_queue_foreign: rx,
 				task_queue: Default::default(),
 				task_queue_cell: to_wake_cell,
+				tick: 0,
 			},
 		}
 	}
@@ -193,23 +239,7 @@ where
 	F: Future + 'static,
 	F::Output: 'static,
 {
-	CURRENT.with(|ctx| {
-		let mut tasks = ctx.tasks.borrow_mut();
-		let id = tasks.insert(None);
-		let handle = JoinHandle::new(id);
-		let task = Box::pin(TaskImpl {
-			ctx: handle.ctx.clone(),
-			waker: Arc::new(waker::Waker {
-				waker: ctx.waker.clone(),
-				id,
-			}),
-			fut,
-		});
-		ctx.waker.wake_local(id).unwrap();
-		tasks[id] = Some(task);
-
-		handle
-	})
+	CURRENT.with(|ctx| ctx.spawn(fut))
 }
 
 impl<T> Future for JoinHandle<T> {

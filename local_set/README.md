@@ -1,6 +1,6 @@
 # local_set
 
-A reimplementaion of `tokio::task::LocalSet` with optimization for !Send + !Sync situation;
+A `tokio::task::LocalSet`-like data structure with runtime-independency;
 
 ## FAQ
 
