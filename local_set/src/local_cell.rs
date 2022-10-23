@@ -1,7 +1,7 @@
 use slab::Slab;
 use std::{
 	cell::RefCell,
-	collections::BTreeSet,
+	collections::{VecDeque},
 	sync::atomic::{AtomicU32, Ordering},
 };
 
@@ -29,36 +29,38 @@ static MONO_ID: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
 	static THRD_ID: u32 = MONO_ID.fetch_add(1, Ordering::Relaxed);
-	static GLOBAL_STORE: RefCell<Slab<BTreeSet<usize>>> = RefCell::new(Slab::new());
+	static GLOBAL_STORE: RefCell<Slab<VecDeque<usize>>> = RefCell::new(Slab::new());
 }
 
 impl LocalCell {
 	pub(crate) fn new() -> Self {
-		let store_id = GLOBAL_STORE.with(|store| store.borrow_mut().insert(BTreeSet::new()));
+		let store_id = GLOBAL_STORE.with(|store| store.borrow_mut().insert(Default::default()));
 		Self {
 			store_id,
 			thread_id: THRD_ID.with(|thread_id| *thread_id),
 		}
 	}
 
-	pub(crate) fn fetch(&mut self) -> BTreeSet<usize> { self.with_mut(|set| std::mem::take(set)) }
-
-	fn with_mut<T>(&self, f: impl FnOnce(&mut BTreeSet<usize>) -> T) -> T {
-		GLOBAL_STORE.with(|store| f(&mut store.borrow_mut()[self.store_id]))
+	pub(crate) fn fetch(&mut self) -> Option<usize> {
+		GLOBAL_STORE.with(|store| {
+			let queue = &mut store.borrow_mut()[self.store_id];
+			queue.pop_front()
+		})
 	}
 }
 
 impl LocalCellRef {
-	pub(crate) fn notify(&self, task_id: usize) -> Result<bool, ()> {
-		self.try_with_mut(|set| set.insert(task_id))
-	}
-
-	// XXX: no nesting!!!
-	fn try_with_mut<T>(&self, f: impl FnOnce(&mut BTreeSet<usize>) -> T) -> Result<T, ()> {
+	pub(crate) fn notify(&self, task_id: usize) -> Result<(), ()> {
 		if THRD_ID.with(|&id| self.thread_id != id) {
 			Err(())
 		} else {
-			GLOBAL_STORE.with(|store| store.borrow_mut().get_mut(self.store_id).map(f).ok_or(()))
+			GLOBAL_STORE.with(|store| {
+				store
+					.borrow_mut()
+					.get_mut(self.store_id)
+					.map(|queue| queue.push_back(task_id))
+					.ok_or(())
+			})
 		}
 	}
 }

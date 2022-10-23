@@ -108,7 +108,7 @@ impl CachedWaker {
 		}
 	}
 
-	pub(crate) fn wake_local(&self, id: usize) -> Result<bool, ()> { self.local_waker.notify(id) }
+	pub(crate) fn wake_local(&self, id: usize) -> Result<(), ()> { self.local_waker.notify(id) }
 
 	fn wake_by_id(&self, id: usize) {
 		if self.local_waker.notify(id).is_err() {

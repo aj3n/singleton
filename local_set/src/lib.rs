@@ -1,6 +1,5 @@
 use std::{
 	cell::{Cell, RefCell},
-	collections::VecDeque,
 	future::Future,
 	pin::Pin,
 	rc::Rc,
@@ -52,24 +51,27 @@ pub struct LocalSet {
 	scheduler: Scheduler,
 }
 
-// TODO: refactor this
 struct Scheduler {
 	task_queue_cell: local_cell::LocalCell,
 	task_queue_foreign: mpsc::Receiver<usize>,
-	task_queue: VecDeque<usize>,
 	tick: u8,
 }
 
 impl Scheduler {
 	fn fetch(&mut self) -> Option<usize> {
+		const FOREIGN_QUEUE_INTERVAL: u8 = 31;
 		self.tick = self.tick.wrapping_add(1);
-		if self.task_queue.is_empty() {
-			self.task_queue.extend(self.task_queue_cell.fetch())
-		}
 		// FIXME: foreign_waker starvation
-		self.task_queue
-			.pop_front()
-			.or_else(|| self.task_queue_foreign.try_recv().ok())
+		if self.tick % FOREIGN_QUEUE_INTERVAL == 0 {
+			self.task_queue_cell
+				.fetch()
+				.or_else(|| self.task_queue_foreign.try_recv().ok())
+		} else {
+			self.task_queue_foreign
+				.try_recv()
+				.ok()
+				.or_else(|| self.task_queue_cell.fetch())
+		}
 	}
 }
 
@@ -161,7 +163,7 @@ struct RunUntil<'a, F: Future> {
 	fut: F,
 }
 
-const MAX_RUN_PER_POLL: u8 = 32;
+const MAX_RUN_PER_POLL: u8 = 61;
 
 impl<'a, F: Future> Future for RunUntil<'a, F> {
 	type Output = F::Output;
@@ -225,7 +227,7 @@ impl Default for LocalSet {
 			},
 			scheduler: Scheduler {
 				task_queue_foreign: rx,
-				task_queue: Default::default(),
+				//task_queue: Default::default(),
 				task_queue_cell: to_wake_cell,
 				tick: 0,
 			},
