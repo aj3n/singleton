@@ -1,5 +1,7 @@
+#![feature(allocator_api, layout_for_ptr)]
 use std::{
 	cell::{Cell, RefCell},
+	collections::VecDeque,
 	future::Future,
 	pin::Pin,
 	rc::Rc,
@@ -10,7 +12,7 @@ use std::{
 use slab::Slab;
 use waker::CachedWaker;
 
-mod local_cell;
+mod shared_rc;
 mod waker;
 
 scoped_tls::scoped_thread_local!(static CURRENT: Context);
@@ -52,7 +54,7 @@ pub struct LocalSet {
 }
 
 struct Scheduler {
-	task_queue_cell: local_cell::LocalCell,
+	task_queue: shared_rc::Rc<RefCell<VecDeque<usize>>>,
 	task_queue_foreign: mpsc::Receiver<usize>,
 	tick: u8,
 }
@@ -63,14 +65,15 @@ impl Scheduler {
 		self.tick = self.tick.wrapping_add(1);
 		// FIXME: foreign_waker starvation
 		if self.tick % FOREIGN_QUEUE_INTERVAL == 0 {
-			self.task_queue_cell
-				.fetch()
+			self.task_queue
+				.borrow_mut()
+				.pop_front()
 				.or_else(|| self.task_queue_foreign.try_recv().ok())
 		} else {
 			self.task_queue_foreign
 				.try_recv()
 				.ok()
-				.or_else(|| self.task_queue_cell.fetch())
+				.or_else(|| self.task_queue.borrow_mut().pop_front())
 		}
 	}
 }
@@ -218,17 +221,16 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 
 impl Default for LocalSet {
 	fn default() -> Self {
-		let to_wake_cell = local_cell::LocalCell::new();
+		let task_queue = shared_rc::Rc::new(RefCell::new(VecDeque::new()));
 		let (tx, rx) = mpsc::channel();
 		Self {
 			context: Context {
 				tasks: RefCell::new(Slab::new()),
-				waker: Arc::new(CachedWaker::new((&to_wake_cell).into(), tx)),
+				waker: Arc::new(CachedWaker::new(shared_rc::Rc::downgrade(&task_queue), tx)),
 			},
 			scheduler: Scheduler {
 				task_queue_foreign: rx,
-				//task_queue: Default::default(),
-				task_queue_cell: to_wake_cell,
+				task_queue,
 				tick: 0,
 			},
 		}

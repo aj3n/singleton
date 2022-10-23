@@ -9,6 +9,7 @@ edition = "2021"
 pin-project = "1.0.12"
 scoped-tls = "1.0.0"
 slab = "0.4.7"
+thread-id = "4.0.0"
 
 [dev-dependencies]
 tokio = { version = "1.21.2", features = ["full"] }

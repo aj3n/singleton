@@ -1,9 +1,8 @@
 #![cfg(test)]
 use std::{
 	cell::Cell,
-	future::{ready, Future},
-	pin::Pin,
-	task::{self, Context, Poll, RawWaker, RawWakerVTable},
+	future::{ready},
+	task::{self,   RawWaker, RawWakerVTable},
 	time::Instant,
 };
 

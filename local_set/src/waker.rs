@@ -1,4 +1,6 @@
 use std::{
+	cell::RefCell,
+	collections::VecDeque,
 	marker::PhantomData,
 	mem::ManuallyDrop,
 	ops::Deref,
@@ -9,7 +11,9 @@ use std::{
 	task::{self, RawWaker, RawWakerVTable},
 };
 
-use crate::local_cell;
+use crate::shared_rc;
+
+//use crate::local_cell;
 
 pub(crate) struct Waker {
 	pub(crate) waker: Arc<CachedWaker>,
@@ -87,7 +91,7 @@ fn noop_vtable() -> &'static RawWakerVTable {
 unsafe fn do_nothing(_: *const ()) {}
 
 pub(crate) struct CachedWaker {
-	local_waker: local_cell::LocalCellRef,
+	local_waker: shared_rc::Weak<RefCell<VecDeque<usize>>>,
 	foreign_waker: mpsc::Sender<usize>,
 
 	waked: AtomicBool,
@@ -97,7 +101,7 @@ pub(crate) struct CachedWaker {
 
 impl CachedWaker {
 	pub(crate) fn new(
-		local_waker: local_cell::LocalCellRef,
+		local_waker: shared_rc::Weak<RefCell<VecDeque<usize>>>,
 		foreign_waker: mpsc::Sender<usize>,
 	) -> Self {
 		Self {
@@ -108,10 +112,19 @@ impl CachedWaker {
 		}
 	}
 
-	pub(crate) fn wake_local(&self, id: usize) -> Result<(), ()> { self.local_waker.notify(id) }
+	pub(crate) fn wake_local(&self, id: usize) -> Result<(), ()> {
+		self.local_waker
+			.upgrade()
+			.ok_or(())?
+			.borrow_mut()
+			.push_back(id);
+		Ok(())
+	}
 
 	fn wake_by_id(&self, id: usize) {
-		if self.local_waker.notify(id).is_err() {
+		if let Some(task_queue) = self.local_waker.upgrade() {
+			task_queue.borrow_mut().push_back(id);
+		} else {
 			let _ = self.foreign_waker.send(id);
 		}
 		if !self.waked.swap(true, Ordering::Relaxed) {
