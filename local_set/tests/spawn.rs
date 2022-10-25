@@ -1,10 +1,5 @@
 #![cfg(test)]
-use std::{
-	cell::Cell,
-	future::ready,
-	task::{self, RawWaker, RawWakerVTable},
-	time::Instant,
-};
+use std::{future::ready, time::Instant};
 
 use futures::task::LocalSpawnExt;
 use local_set::{spawn_local, LocalSet};
@@ -22,13 +17,6 @@ async fn spawn_test() {
 			}
 		})
 		.await
-}
-
-fn noop_waker() -> task::Waker { unsafe { task::Waker::from_raw(noop_waker_raw()) } }
-fn noop_waker_raw() -> RawWaker { RawWaker::new(&() as _, noop_vtable()) }
-
-fn noop_vtable() -> &'static RawWakerVTable {
-	&RawWakerVTable::new(|_| noop_waker_raw(), drop, drop, drop)
 }
 
 #[tokio::test]
@@ -57,6 +45,18 @@ async fn heavy_spawn() {
 			pool.run_until(futures_spawn_recure(task_cnt));
 		});
 		println!("futures: {}", now.elapsed().as_millis());
+	}
+}
+
+#[test]
+fn heavy_spawn_miri() {
+	futures::executor::block_on(LocalSet::default().run_until(singleton_spawn_recure(100)));
+	{
+		let mut pool = futures::executor::LocalPool::new();
+		let spawner = pool.spawner();
+		SPAWNER.set(&spawner, || {
+			pool.run_until(futures_spawn_recure(100));
+		});
 	}
 }
 
