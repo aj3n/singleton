@@ -1,10 +1,11 @@
 use std::{
 	alloc::{Allocator, Global, Layout},
 	cell::Cell,
-	marker::PhantomData,
+	marker::{PhantomData, Unsize},
 	ops::Deref,
 	ptr::{self, NonNull},
 	sync::atomic::{self, Ordering},
+	usize,
 };
 
 /// # README
@@ -95,6 +96,18 @@ impl<T: ?Sized> Rc<T> {
 			}
 		}
 	}
+
+	pub fn unsize<U: ?Sized>(self) -> Rc<U>
+	where
+		T: Unsize<U>,
+	{
+		let ptr = self.ptr;
+		std::mem::forget(self);
+		Rc {
+			ptr,
+			_marker: PhantomData,
+		}
+	}
 }
 
 impl<T> Rc<T> {
@@ -133,6 +146,27 @@ impl<T: ?Sized> Drop for Rc<T> {
 			ptr::drop_in_place(&mut (*self.ptr.as_ptr()).data);
 
 			drop(Weak { ptr: self.ptr })
+		}
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+	#[test]
+	fn test_rc() {
+		let arr = Rc::new([
+			"1".to_owned(),
+			"2".to_owned(),
+			"3".to_owned(),
+			"4".to_owned(),
+		]);
+		let slc: Rc<[String]> = arr.unsize();
+		assert_eq!(slc.len(), 4);
+		let slc2 = Rc::downgrade(&slc).upgrade().unwrap();
+		assert_eq!(slc2.len(), 4);
+		for (s,i) in slc.iter().zip(1..) {
+			assert_eq!(s, &i.to_string());
 		}
 	}
 }

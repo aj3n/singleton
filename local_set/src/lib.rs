@@ -1,4 +1,5 @@
-#![feature(allocator_api, layout_for_ptr)]
+#![feature(allocator_api, unsize, layout_for_ptr)]
+
 use std::{
 	cell::{Cell, RefCell},
 	collections::VecDeque,
@@ -14,8 +15,9 @@ use waker::CachedWaker;
 
 mod shared_rc;
 mod waker;
+//mod scoped;
 
-scoped_tls::scoped_thread_local!(static CURRENT: Context);
+scoped_tls::scoped_thread_local!(static CURRENT: Rc<Context<>>);
 struct Context {
 	tasks: RefCell<Slab<Option<TaskWrapper>>>,
 	waker: Arc<CachedWaker>,
@@ -23,10 +25,21 @@ struct Context {
 
 impl Context {
 	#[inline]
-	fn spawn<F: Future + 'static>(&self, fut: F) -> JoinHandle<<F as Future>::Output> {
+	fn spawn<F: Future + 'static>(
+		self: &Rc<Self>,
+		fut: F,
+	) -> JoinHandle<<F as Future>::Output> {
 		let mut tasks = self.tasks.borrow_mut();
 		let id = tasks.insert(None);
-		let handle = JoinHandle::new(id);
+		let handle = JoinHandle {
+			ctx: Rc::new(JoinHandleCtx {
+				output: Cell::new(None),
+				waker: Cell::new(None),
+				canceled: Cell::new(false),
+				id: Cell::new(id),
+			}),
+			detached: false,
+		};
 		let task = Box::pin(TaskImpl {
 			ctx: handle.ctx.clone(),
 			waker: Arc::new(self.waker(id)),
@@ -48,7 +61,7 @@ impl Context {
 }
 
 pub struct LocalSet {
-	context: Context,
+	context: Rc<Context>,
 
 	scheduler: Scheduler,
 }
@@ -98,37 +111,47 @@ impl LocalSet {
 	fn _block_on<F: Future>(&mut self, _fut: F) -> <F as Future>::Output {
 		todo!("should only be called by async executor");
 	}
+
+	fn new() -> Self {
+		let task_queue = shared_rc::Rc::new(RefCell::new(VecDeque::new()));
+		let (tx, rx) = mpsc::channel();
+		Self {
+			context: Rc::new(Context {
+				tasks: RefCell::new(Slab::new()),
+				waker: Arc::new(CachedWaker::new(shared_rc::Rc::downgrade(&task_queue), tx)),
+			}),
+			scheduler: Scheduler {
+				task_queue_foreign: rx,
+				task_queue,
+				tick: 0,
+			},
+		}
+	}
 }
 
-type TaskWrapper = Pin<Box<dyn Task>>;
+impl Default for LocalSet {
+	fn default() -> Self { Self::new() }
+}
+
+type TaskWrapper = Pin<Box<dyn Task + 'static>>;
 
 struct JoinHandleCtx<T> {
 	output: Cell<Option<T>>,
 	waker: Cell<Option<task::Waker>>,
-	_id: usize,
+	id: Cell<usize>,
+	canceled: Cell<bool>,
 }
 
 pub struct JoinHandle<T> {
 	ctx: Rc<JoinHandleCtx<T>>,
+	detached: bool,
 }
+
 impl<T: Unpin> Unpin for JoinHandle<T> {}
-
-impl<T> JoinHandle<T> {
-	fn new(id: usize) -> Self {
-		Self {
-			ctx: Rc::new(JoinHandleCtx {
-				output: Cell::new(None),
-				waker: Cell::new(None),
-				_id: id,
-			}),
-		}
-	}
-
-	fn _id(&self) -> usize { self.ctx._id }
-}
 
 trait Task {
 	fn poll(self: Pin<&mut Self>) -> Poll<()>;
+	fn canceled(self: Pin<&Self>) -> bool;
 }
 
 #[pin_project::pin_project]
@@ -139,7 +162,7 @@ struct TaskImpl<F: Future> {
 	fut: F,
 }
 
-impl<F: Future> Task for TaskImpl<F> {
+impl<F: Future> Task for TaskImpl< F> {
 	fn poll(self: Pin<&mut Self>) -> Poll<()> {
 		let me = self.project();
 		let waker = waker::waker_ref(me.waker);
@@ -156,6 +179,8 @@ impl<F: Future> Task for TaskImpl<F> {
 			_ => Poll::Pending,
 		}
 	}
+
+	fn canceled(self: Pin<&Self>) -> bool { self.project_ref().ctx.canceled.get() }
 }
 
 #[pin_project::pin_project]
@@ -192,16 +217,16 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 						.get_mut(next)
 						.and_then(Option::take);
 					if let Some(mut task) = task {
-						if task.as_mut().poll().is_ready() {
-							me.local_set.context.tasks.borrow_mut().remove(next);
-						} else {
+						if !task.as_ref().canceled() && task.as_mut().poll().is_pending() {
 							me.local_set.context.tasks.borrow_mut()[next] = Some(task);
+						} else {
+							me.local_set.context.tasks.borrow_mut().remove(next);
 						}
 					} else if next == me.waker.id {
 						let waker = waker::waker_ref(me.waker);
 						let mut cx = std::task::Context::from_waker(&waker);
 						if let Poll::Ready(v) = me.fut.as_mut().poll(&mut cx) {
-							me.local_set.context.tasks.borrow_mut().remove(next);
+							me.local_set.context.tasks.borrow_mut().try_remove(next);
 							return Poll::Ready(v);
 						}
 					} else {
@@ -219,24 +244,6 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 	}
 }
 
-impl Default for LocalSet {
-	fn default() -> Self {
-		let task_queue = shared_rc::Rc::new(RefCell::new(VecDeque::new()));
-		let (tx, rx) = mpsc::channel();
-		Self {
-			context: Context {
-				tasks: RefCell::new(Slab::new()),
-				waker: Arc::new(CachedWaker::new(shared_rc::Rc::downgrade(&task_queue), tx)),
-			},
-			scheduler: Scheduler {
-				task_queue_foreign: rx,
-				task_queue,
-				tick: 0,
-			},
-		}
-	}
-}
-
 // must called within a LocalSet::run_until
 pub fn spawn_local<F>(fut: F) -> JoinHandle<F::Output>
 where
@@ -244,6 +251,11 @@ where
 	F::Output: 'static,
 {
 	CURRENT.with(|ctx| ctx.spawn(fut))
+}
+
+impl<T> JoinHandle<T> {
+	pub fn detach(mut self) { self.detached = true; }
+	pub fn cancel(self) -> Option<T> { self.ctx.output.take() }
 }
 
 impl<T> Future for JoinHandle<T> {
@@ -259,6 +271,17 @@ impl<T> Future for JoinHandle<T> {
 				self.ctx.waker.set(Some(cx.waker().clone()));
 				Poll::Pending
 			}
+		}
+	}
+}
+
+impl<T> Drop for JoinHandle<T> {
+	fn drop(&mut self) {
+		if !self.detached {
+			if let Some(waker) = self.ctx.waker.take() {
+				waker.wake();
+			}
+			self.ctx.canceled.set(true);
 		}
 	}
 }
