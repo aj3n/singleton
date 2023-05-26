@@ -1,5 +1,8 @@
-use std::{
+use alloc::{
 	alloc::{Allocator, Global, Layout},
+	boxed::Box,
+};
+use core::{
 	cell::Cell,
 	marker::{PhantomData, Unsize},
 	ops::Deref,
@@ -15,7 +18,7 @@ use std::{
 /// - `Weak<T> : Sync + Send` no matter `T: !Sync` or `T: !Send`
 /// - `Weak<T>::upgrade` will return `Some(Rc<T>)` if and only if `Weak<T>::upgrade` is called in the same thread `Rc<T>` constructed.
 struct RcInner<T: ?Sized> {
-	thread_id: usize,
+	thread_id: u32,
 
 	strong: Cell<usize>,
 
@@ -54,7 +57,7 @@ impl<T: ?Sized> Weak<T> {
 	pub fn upgrade(&self) -> Option<Rc<T>> {
 		unsafe {
 			let inner = self.ptr.as_ref();
-			if inner.thread_id != thread_id::get() {
+			if inner.thread_id != crate::thread_id::get() {
 				return None;
 			}
 
@@ -102,7 +105,7 @@ impl<T: ?Sized> Rc<T> {
 		T: Unsize<U>,
 	{
 		let ptr = self.ptr;
-		std::mem::forget(self);
+		core::mem::forget(self);
 		Rc {
 			ptr,
 			_marker: PhantomData,
@@ -114,7 +117,7 @@ impl<T> Rc<T> {
 	pub fn new(data: T) -> Self {
 		let x = Box::new(RcInner {
 			strong: Cell::new(1),
-			thread_id: thread_id::get(),
+			thread_id: crate::thread_id::get(),
 			weak: atomic::AtomicUsize::new(1),
 			data,
 		});
@@ -153,19 +156,20 @@ impl<T: ?Sized> Drop for Rc<T> {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use alloc::string::{String, ToString};
 	#[test]
 	fn test_rc() {
 		let arr = Rc::new([
-			"1".to_owned(),
-			"2".to_owned(),
-			"3".to_owned(),
-			"4".to_owned(),
+			"1".to_string(),
+			"2".to_string(),
+			"3".to_string(),
+			"4".to_string(),
 		]);
 		let slc: Rc<[String]> = arr.unsize();
 		assert_eq!(slc.len(), 4);
 		let slc2 = Rc::downgrade(&slc).upgrade().unwrap();
 		assert_eq!(slc2.len(), 4);
-		for (s,i) in slc.iter().zip(1..) {
+		for (s, i) in slc.iter().zip(1..) {
 			assert_eq!(s, &i.to_string());
 		}
 	}

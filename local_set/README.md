@@ -8,6 +8,7 @@ A `tokio::task::LocalSet`-like data structure with runtime-independency;
 
 - you're looking for a pure single-thread `LocalSet` without capability of executing foreign tasks.
 - you're doing runtime-independent work.
+- a wasi compatible async executor is needed
 
 ### When should I use this crate instead of futures::stream::{FuturesUnordered, FuturesOrdered}
 

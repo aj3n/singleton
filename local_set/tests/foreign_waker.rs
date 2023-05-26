@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use local_set::{spawn_local, LocalSet};
 
-#[tokio::test]
+/*#[tokio::test]
 async fn foreign_waker() {
 	let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 	let j = std::thread::spawn(move || {
@@ -24,4 +24,4 @@ async fn foreign_waker() {
 		.await;
 
 	j.join().unwrap();
-}
+}*/

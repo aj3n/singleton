@@ -1,12 +1,16 @@
 #![feature(allocator_api, unsize, layout_for_ptr)]
+#![no_std]
 
-use std::{
+extern crate alloc;
+extern crate std;
+
+use alloc::{boxed::Box, collections::VecDeque, rc::Rc, sync::Arc};
+use std::sync::mpsc;
+
+use core::{
 	cell::{Cell, RefCell},
-	collections::VecDeque,
 	future::Future,
 	pin::Pin,
-	rc::Rc,
-	sync::{mpsc, Arc},
 	task::{self, Poll},
 };
 
@@ -14,6 +18,7 @@ use slab::Slab;
 use waker::CachedWaker;
 
 mod shared_rc;
+pub(crate) mod thread_id;
 mod waker;
 //mod scoped;
 
@@ -25,10 +30,7 @@ struct Context {
 
 impl Context {
 	#[inline]
-	fn spawn<F: Future + 'static>(
-		self: &Rc<Self>,
-		fut: F,
-	) -> JoinHandle<<F as Future>::Output> {
+	fn spawn<F: Future + 'static>(self: &Rc<Self>, fut: F) -> JoinHandle<<F as Future>::Output> {
 		let mut tasks = self.tasks.borrow_mut();
 		let id = tasks.insert(None);
 		let handle = JoinHandle {
@@ -162,11 +164,11 @@ struct TaskImpl<F: Future> {
 	fut: F,
 }
 
-impl<F: Future> Task for TaskImpl< F> {
+impl<F: Future> Task for TaskImpl<F> {
 	fn poll(self: Pin<&mut Self>) -> Poll<()> {
 		let me = self.project();
 		let waker = waker::waker_ref(me.waker);
-		let mut cx = std::task::Context::from_waker(&waker);
+		let mut cx = core::task::Context::from_waker(&waker);
 
 		match me.fut.poll(&mut cx) {
 			Poll::Ready(output) => {
@@ -196,7 +198,10 @@ const MAX_RUN_PER_POLL: u8 = 61;
 impl<'a, F: Future> Future for RunUntil<'a, F> {
 	type Output = F::Output;
 
-	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+	fn poll(
+		self: core::pin::Pin<&mut Self>,
+		cx: &mut core::task::Context<'_>,
+	) -> Poll<Self::Output> {
 		let mut me = self.project();
 
 		me.local_set.context.waker.reset(cx.waker());
@@ -224,7 +229,7 @@ impl<'a, F: Future> Future for RunUntil<'a, F> {
 						}
 					} else if next == me.waker.id {
 						let waker = waker::waker_ref(me.waker);
-						let mut cx = std::task::Context::from_waker(&waker);
+						let mut cx = core::task::Context::from_waker(&waker);
 						if let Poll::Ready(v) = me.fut.as_mut().poll(&mut cx) {
 							me.local_set.context.tasks.borrow_mut().try_remove(next);
 							return Poll::Ready(v);
@@ -262,9 +267,9 @@ impl<T> Future for JoinHandle<T> {
 	type Output = T;
 
 	fn poll(
-		self: std::pin::Pin<&mut Self>,
-		cx: &mut std::task::Context<'_>,
-	) -> std::task::Poll<Self::Output> {
+		self: core::pin::Pin<&mut Self>,
+		cx: &mut core::task::Context<'_>,
+	) -> core::task::Poll<Self::Output> {
 		match self.ctx.output.take() {
 			Some(v) => Poll::Ready(v),
 			None => {

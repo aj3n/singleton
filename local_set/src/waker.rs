@@ -1,15 +1,14 @@
-use std::{
+use alloc::{collections::VecDeque, sync::Arc};
+use core::{
 	cell::RefCell,
-	collections::VecDeque,
 	marker::PhantomData,
 	mem::ManuallyDrop,
 	ops::Deref,
-	sync::{
-		atomic::{AtomicBool, Ordering},
-		mpsc, Arc, Mutex,
-	},
+	sync::atomic::{AtomicBool, Ordering},
 	task::{self, RawWaker, RawWakerVTable},
 };
+
+use std::sync::{mpsc, Mutex};
 
 use crate::shared_rc;
 
@@ -28,7 +27,7 @@ impl Waker {
 pub(crate) fn waker_ref(w: &Arc<Waker>) -> WakerRef<'_> {
 	let ptr = Arc::as_ptr(w) as *const ();
 
-	let waker = unsafe { std::task::Waker::from_raw(RawWaker::new(ptr, waker_vtable())) };
+	let waker = unsafe { core::task::Waker::from_raw(RawWaker::new(ptr, waker_vtable())) };
 
 	WakerRef {
 		waker: ManuallyDrop::new(waker),
@@ -71,14 +70,14 @@ unsafe fn wake_by_ref_arc_raw(data: *const ()) {
 unsafe fn drop_arc_raw(data: *const ()) { drop(Arc::<Waker>::from_raw(data.cast::<Waker>())) }
 
 pub(crate) struct WakerRef<'a> {
-	waker: ManuallyDrop<std::task::Waker>,
+	waker: ManuallyDrop<core::task::Waker>,
 	_p: PhantomData<&'a ()>,
 }
 
 impl Deref for WakerRef<'_> {
-	type Target = std::task::Waker;
+	type Target = core::task::Waker;
 
-	fn deref(&self) -> &std::task::Waker { &self.waker }
+	fn deref(&self) -> &core::task::Waker { &self.waker }
 }
 
 fn noop_waker() -> task::Waker { unsafe { task::Waker::from_raw(noop_waker_raw()) } }
